@@ -1,10 +1,9 @@
 from __future__ import annotations
-
-from typing import Optional
-
+from typing import Optional, Tuple
 import requests
 
 BASE_URL = "https://api.helioviewer.org/v2/"
+
 
 
 def get_closest_image_id(date: str, source_id: int, timeout: float = 60.0) -> Optional[int]:
@@ -30,6 +29,18 @@ def get_closest_image_id(date: str, source_id: int, timeout: float = 60.0) -> Op
         return None
     data = r.json()
     return data.get("id")
+
+def get_closest_image(date: str, source_id: int, timeout: float = 60.0) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Returns (image_id, closest_date_str) where closest_date_str is like "YYYY-MM-DD HH:MM:SS" (UTC).
+    """
+    url = f"{BASE_URL}getClosestImage/"
+    r = requests.get(url, params={"date": date, "sourceId": source_id}, timeout=timeout)
+    if r.status_code != 200:
+        return None, None
+    data = r.json()
+    return data.get("id"), data.get("date")
+
 
 
 def get_jp2_image_bytes(image_id: int, timeout: float = 120.0) -> Optional[bytes]:

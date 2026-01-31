@@ -16,11 +16,16 @@ def main():
                         help="ISO date, can be given multiple times.")
     p_fits.add_argument("--no-header-txt", action="store_true")
 
+    p_fits.add_argument("--max-dt-seconds", type=float, default=None)
+    p_fits.add_argument("--failed-log", type=str, default=None)
+
     p_png = sub.add_parser("png", help="Download JP2 and write PNG into date folders.")
     p_png.add_argument("--source-id", type=int, required=True)
     p_png.add_argument("--out", type=str, default=".")
     p_png.add_argument("--date", action="append", required=True,
                        help="ISO date, can be given multiple times.")
+    p_fits.add_argument("--max-dt-seconds", type=float, default=None)
+    p_fits.add_argument("--failed-log", type=str, default=None)
 
     args = p.parse_args()
 
@@ -39,3 +44,8 @@ def main():
             base_output_path=args.out,
         )
         print(json.dumps(res, indent=2))
+
+
+
+p_png.add_argument("--max-dt-seconds", type=float, default=None)
+p_png.add_argument("--failed-log", type=str, default=None)
