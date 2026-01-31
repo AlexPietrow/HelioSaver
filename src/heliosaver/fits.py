@@ -147,7 +147,10 @@ def process_helioviewer_fits(
                 f.write(header_text)
 
         img = jp2_bytes_to_numpy(jp2_bytes)
+        img = np.flipud(img)
+
         hdr = header_xml_to_fits_header(header_text)
+        hdr["FLIPUD"] = True
 
         # Prefer closest_date from API, else fall back to DATE_OBS from header, else requested_date
         obs_date = closest_date or str(hdr.get("DATE_OBS", requested_date))
