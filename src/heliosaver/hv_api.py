@@ -41,6 +41,12 @@ def get_closest_image(date: str, source_id: int, timeout: float = 60.0) -> Tuple
     data = r.json()
     return data.get("id"), data.get("date")
 
+def get_closest_image(date: str, source_id: int, timeout: float = 60.0):
+    url = f"{BASE_URL}getClosestImage/"
+    r = requests.get(url, params={"date": date, "sourceId": source_id}, timeout=timeout)
+    if r.status_code != 200:
+        return None
+    return r.json()
 
 
 def get_jp2_image_bytes(image_id: int, timeout: float = 120.0) -> Optional[bytes]:

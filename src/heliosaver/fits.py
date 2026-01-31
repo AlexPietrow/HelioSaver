@@ -1,3 +1,4 @@
+# src/heliosaver/fits.py
 from __future__ import annotations
 
 import io
@@ -7,25 +8,16 @@ from xml.etree import ElementTree as ET
 
 import imageio.v3 as iio
 import numpy as np
+import requests
 from astropy.io import fits
 
-from .hv_api import get_closest_image_id, get_jp2_header_text, get_jp2_image_bytes
-
+from .hv_api import BASE_URL, get_jp2_header_text, get_jp2_image_bytes
 
 
 def jp2_bytes_to_numpy(jp2_bytes: bytes) -> np.ndarray:
-    """Decode JP2 bytes into a numpy array using imageio.
-
-    Raises
-    ------
-    RuntimeError
-        If decoding fails.
-    """
-    try:
-        img = iio.imread(io.BytesIO(jp2_bytes), extension=".jp2")
-        return np.asarray(img)
-    except Exception as e:
-        raise RuntimeError(f"Failed to decode JP2: {e}") from e
+    """Decode JP2 bytes into a numpy array using imageio."""
+    img = iio.imread(io.BytesIO(jp2_bytes), extension=".jp2")
+    return np.asarray(img)
 
 
 def _sanitize_fits_value(value: Optional[str]) -> str:
@@ -85,128 +77,94 @@ def header_xml_to_fits_header(xml_text: str) -> fits.Header:
     return hdr
 
 
+def _slug(s: str) -> str:
+    s = s.strip()
+    if not s:
+        return "source"
+    out = []
+    for c in s:
+        if c.isalnum() or c in "-_":
+            out.append(c)
+        else:
+            out.append("_")
+    slug = "".join(out).strip("_")
+    return slug or "source"
+
+
+def _get_closest_image(date: str, source_id: int, timeout: float = 60.0) -> Optional[dict]:
+    """Return full getClosestImage JSON (id, date, name, etc.)."""
+    r = requests.get(
+        f"{BASE_URL}getClosestImage/",
+        params={"date": date, "sourceId": source_id},
+        timeout=timeout,
+    )
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+
 def process_helioviewer_fits(
-    dates: List[str],
+    dates: Union[str, List[str]],
     source_id: int,
     output_path: str = ".",
     save_header_txt: bool = True,
-    max_time_delta_seconds: Optional[float] = None,
-    failed_log_path: Optional[str] = None,
 ) -> Dict[str, Dict[str, Optional[str]]]:
-    """
-    Download JP2 + header for each requested date, convert to FITS, and write to disk.
+    """Closest-image pipeline: download JP2 + header, then write FITS.
 
-    New options:
-      - max_time_delta_seconds: if set, only download when the Helioviewer "closest image"
-        timestamp is within ±max_time_delta_seconds of the requested date.
-      - failed_log_path: if set, append skipped/failed requests to this text file.
-
-    Returns
-    -------
-    dict: {date_str: {"header_txt": <path|None>, "fits": <path|None>}}
+    IMPORTANT:
+    - The FITS *filename* is based on the actual closest observation time returned
+      by Helioviewer (or DATE-OBS fallback), not the requested time.
+    - The FITS filename includes the Helioviewer source nickname (e.g. "HMI Int")
+      instead of "source_18".
     """
-    from datetime import datetime, timezone
-    import requests
+    os.makedirs(output_path, exist_ok=True)
+    if isinstance(dates, str):
+        dates = [dates]
 
     out: Dict[str, Dict[str, Optional[str]]] = {}
-    os.makedirs(output_path, exist_ok=True)
 
-    def _append_failed(line: str) -> None:
-        if not failed_log_path:
-            return
-        with open(failed_log_path, "a", encoding="utf-8") as f:
-            f.write(line.rstrip() + "\n")
+    for requested_date in dates:
+        closest = _get_closest_image(requested_date, source_id)
+        if not closest or "id" not in closest:
+            out[requested_date] = {"header_txt": None, "fits": None}
+            continue
 
-    def _iso_z_to_dt(s: str) -> datetime:
-        # expects "YYYY-MM-DDTHH:MM:SSZ"
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        image_id = int(closest["id"])
+        closest_date = str(closest.get("date", "")).strip()  # "YYYY-MM-DD HH:MM:SS"
+        source_name = str(closest.get("name", f"source{source_id}")).strip()
 
-    def _hv_dt_to_dt(s: str) -> datetime:
-        # Helioviewer getClosestImage returns "YYYY-MM-DD HH:MM:SS" (UTC)
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        jp2_bytes = get_jp2_image_bytes(image_id)
+        header_text = get_jp2_header_text(image_id)
 
-    def _get_closest_image_id_and_date(date: str, sid: int, timeout: float = 60.0):
-        url = f"https://api.helioviewer.org/v2/getClosestImage/"
-        r = requests.get(url, params={"date": date, "sourceId": int(sid)}, timeout=timeout)
-        if r.status_code != 200:
-            return None, None
-        js = r.json()
-        return js.get("id"), js.get("date")
+        if jp2_bytes is None or header_text is None:
+            out[requested_date] = {"header_txt": None, "fits": None}
+            continue
 
-    for date in dates:
-        header_txt_path: Optional[str] = None
-        fits_path: Optional[str] = None
+        header_txt_path = None
+        if save_header_txt:
+            header_txt_path = os.path.join(output_path, f"helioviewer_{image_id}.xml.txt")
+            with open(header_txt_path, "w", encoding="utf-8") as f:
+                f.write(header_text)
 
-        try:
-            image_id, closest_str = _get_closest_image_id_and_date(date, source_id)
+        img = jp2_bytes_to_numpy(jp2_bytes)
+        hdr = header_xml_to_fits_header(header_text)
 
-            if image_id is None or closest_str is None:
-                _append_failed(f"{date}\tsourceId={source_id}\tFAIL:no_closest")
-                out[date] = {"header_txt": None, "fits": None}
-                continue
+        # Prefer closest_date from API, else fall back to DATE_OBS from header, else requested_date
+        obs_date = closest_date or str(hdr.get("DATE_OBS", requested_date))
 
-            if max_time_delta_seconds is not None:
-                try:
-                    req_dt = _iso_z_to_dt(date)
-                except Exception:
-                    _append_failed(f"{date}\tsourceId={source_id}\tFAIL:bad_requested_date_format")
-                    out[date] = {"header_txt": None, "fits": None}
-                    continue
+        # Normalize to ISO-like with Z for naming
+        obs_iso = obs_date.replace(" ", "T")
+        if not obs_iso.endswith("Z"):
+            obs_iso += "Z"
 
-                try:
-                    clo_dt = _hv_dt_to_dt(closest_str)
-                except Exception:
-                    _append_failed(
-                        f"{date}\tsourceId={source_id}\tFAIL:bad_closest_date_format\tclosest={closest_str}"
-                    )
-                    out[date] = {"header_txt": None, "fits": None}
-                    continue
+        stem = obs_iso.replace(":", "").replace("T", "_").replace("Z", "Z")
+        name_slug = _slug(source_name)
 
-                dt_sec = abs((clo_dt - req_dt).total_seconds())
-                if dt_sec > float(max_time_delta_seconds):
-                    _append_failed(
-                        f"{date}\tsourceId={source_id}\tSKIP:closest_out_of_range\t"
-                        f"closest={clo_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}\tdt_sec={int(dt_sec)}"
-                    )
-                    out[date] = {"header_txt": None, "fits": None}
-                    continue
+        fits_path = os.path.join(output_path, f"helioviewer_{stem}_{name_slug}.fits")
 
-            # fetch payloads
-            jp2_bytes = get_jp2_image_bytes(image_id)
-            header_text = get_jp2_header_text(image_id)
+        image_hdu = fits.ImageHDU(data=img, header=hdr, name="JP2_IMAGE")
+        fits.HDUList([fits.PrimaryHDU(), image_hdu]).writeto(fits_path, overwrite=True)
 
-            if jp2_bytes is None or header_text is None:
-                _append_failed(f"{date}\tsourceId={source_id}\tFAIL:download_jp2_or_header\tid={image_id}")
-                out[date] = {"header_txt": None, "fits": None}
-                continue
-
-            if save_header_txt:
-                header_txt_path = os.path.join(output_path, f"helioviewer_{image_id}.xml.txt")
-                with open(header_txt_path, "w", encoding="utf-8") as f:
-                    f.write(header_text)
-
-            img = jp2_bytes_to_numpy(jp2_bytes)
-            hdr = header_xml_to_fits_header(header_text)
-
-            stem = date.replace(":", "").replace("T", "_")
-            fits_path = os.path.join(output_path, f"helioviewer_{stem}_source_{source_id}.fits")
-
-            image_hdu = fits.ImageHDU(data=img, header=hdr, name="JP2_IMAGE")
-            hdul = fits.HDUList([fits.PrimaryHDU(), image_hdu])
-            hdul.writeto(fits_path, overwrite=True)
-
-            out[date] = {"header_txt": header_txt_path, "fits": fits_path}
-
-        except Exception as e:
-            _append_failed(f"{date}\tsourceId={source_id}\tFAIL:exception\t{type(e).__name__}: {e}")
-            out[date] = {"header_txt": None, "fits": None}
+        out[requested_date] = {"header_txt": header_txt_path, "fits": fits_path}
 
     return out
-
-
-def _append_failed(path: str, line: str) -> None:
-    if not path:
-        return
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line.rstrip() + "\n")
-
