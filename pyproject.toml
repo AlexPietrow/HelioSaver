@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heliosaver"
+version = "0.1.0"
+description = "Small utility to download Helioviewer JP2 + metadata and save as FITS/PNG."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name="Alex Pietrow"}]
+dependencies = [
+  "requests>=2.31",
+  "numpy>=1.23",
+  "astropy>=5.0",
+  "imageio>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+  "pytest",
+]
+
+[project.scripts]
+heliosaver = "heliosaver.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
